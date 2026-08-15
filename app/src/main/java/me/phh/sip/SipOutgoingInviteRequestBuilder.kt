@@ -172,6 +172,16 @@ internal object SipOutgoingInviteRequestBuilder {
         )
         val carrierPaniHeaders = carrierSettings.outgoingPaniHeaders(registrationTech)
 
+        val effectivePaniHeaders: SipHeadersMap = if (accessNetworkHeaders.isNotEmpty()) {
+            accessNetworkHeaders
+        } else if (carrierPaniHeaders.isNotEmpty()) {
+            carrierPaniHeaders
+        } else {
+            // Fallback for Nexus 5:
+            // 3GPP-E-UTRAN-FDD with dummy Cell-ID
+            mapOf("p-access-network-info" to listOf("3GPP-E-UTRAN-FDD; utran-cell-id-3gpp=0010100010000001"))
+        }
+
         val supported = if (preconditionEnabled) {
             "100rel, replaces, timer, precondition"
         } else {
@@ -203,7 +213,7 @@ internal object SipOutgoingInviteRequestBuilder {
                 Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
                 P-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mmtel
                 Contact: $contactTel
-                """.toSipHeadersMap() + carrierPaniHeaders +
+                """.toSipHeadersMap() + effectivePaniHeaders +
             generatedCallIdHeaders + accessNetworkHeaders - "p-asserted-identity"
         // P-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mmtel
         // Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
