@@ -100,30 +100,30 @@ internal object ImsNetworkState {
         val pcscf = preferredPcscf ?: if (pcscfs.isNotEmpty()) {
             pcscfs[0]
         } else {
-            // RIL did not provide P-CSCF via LinkProperties. Try standard
-            // 3GPP DNS discovery (TS 23.003 §13.2): resolve the well-known
-            // IMS domain for this PLMN.
-            val dnsFallback = try {
-                InetAddress.getAllByName(
-                    "ims.mnc${mnc}.mcc${mcc}.pub.3gppnetwork.org",
-                ).firstOrNull(ipVersionPolicy::accepts)
-            } catch (t: Throwable) {
-                null
-            } ?: try {
-                InetAddress.getAllByName(
-                    "ims.mnc${mnc}.mcc${mcc}.3gppnetwork.org",
-                ).firstOrNull(ipVersionPolicy::accepts)
-            } catch (t: Throwable) {
-                null
-            } ?: android.os.SystemProperties
+            val dnsFallback = android.os.SystemProperties
                 .get("persist.ims.pcscf_fallback", "")
+                .trim()
                 .takeIf { it.isNotEmpty() }
-                ?.let {
+                ?.let { hostOrIp ->
                     try {
-                        InetAddress.getByName(it)
+                        InetAddress.getAllByName(hostOrIp).firstOrNull(ipVersionPolicy::accepts)
                     } catch (t: Throwable) {
                         null
                     }
+                }
+                ?: try {
+                    InetAddress.getAllByName(
+                        "ims.mnc${mnc}.mcc${mcc}.pub.3gppnetwork.org",
+                    ).firstOrNull(ipVersionPolicy::accepts)
+                } catch (t: Throwable) {
+                    null
+                }
+                ?: try {
+                    InetAddress.getAllByName(
+                        "ims.mnc${mnc}.mcc${mcc}.3gppnetwork.org",
+                    ).firstOrNull(ipVersionPolicy::accepts)
+                } catch (t: Throwable) {
+                    null
                 }
 
             if (dnsFallback != null) {
