@@ -44,7 +44,7 @@ private fun ServiceState.phhRegisteredPlmnForIms(): String? {
 private fun ServiceState.isCellularReadyForPhhIms(
     registeredPlmn: String? = phhRegisteredPlmnForIms(),
 ): Boolean {
-    return state == ServiceState.STATE_IN_SERVICE && registeredPlmn != null
+    return state == ServiceState.STATE_IN_SERVICE
 }
 
 private fun ServiceState.phhIwlanRegistrationForIms(): NetworkRegistrationInfo? {
