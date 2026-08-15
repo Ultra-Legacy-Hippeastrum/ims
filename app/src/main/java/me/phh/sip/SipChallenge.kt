@@ -32,73 +32,104 @@ fun sipAkaChallenge(tm: TelephonyManager, nonceB64: String): SipAkaResult {
     }
 }
 
+fun getUsimAid(tm: TelephonyManager): String {
+    try {
+        val method = tm.javaClass.methods.firstOrNull {
+            it.name == "getAidForAppType" && it.parameterTypes.size == 1
+        }
+        if (method != null) {
+            val aid = method.invoke(tm, TelephonyManager.APPTYPE_USIM) as? String
+            if (!aid.isNullOrBlank()) {
+                Rlog.d(TAG, "TelephonyManager.getAidForAppType returned AID: $aid")
+                return aid
+            }
+        }
+    } catch (_: Throwable) {}
+
+    Rlog.w(TAG, "getAidForAppType failed, using a0000000871002 as fallback")
+    return "a0000000871002"
+}
+
 fun sipAkaChallengeForRegistration(
     tm: TelephonyManager,
     nonceB64: String,
 ): SipAkaChallengeResult {
     val nonce = Base64.decode(nonceB64, Base64.DEFAULT)
-    val rand = nonce.take(16)
-    val autn = nonce.drop(16).take(16)
-    // val mac = nonce.drop(32)
+    val rand = nonce.take(16).toByteArray()
+    val autn = nonce.drop(16).take(16).toByteArray()
 
-    val challengeBytes = listOf(rand.size.toByte()) + rand + autn.size.toByte() + autn
+    val challengeBytes = listOf(rand.size.toByte()) + rand.toList() + listOf(autn.size.toByte()) + autn.toList()
     val challengeArray = challengeBytes.toByteArray()
-    val challenge = Base64.encodeToString(challengeArray, Base64.NO_WRAP)
-    Rlog.d(TAG, "Requesting USIM AKA authentication challengeBytes=${challengeArray.size}")
-    val responseB64 = tm.getIccAuthentication(
-        TelephonyManager.APPTYPE_USIM,
-        TelephonyManager.AUTHTYPE_EAP_AKA,
-        challenge
-    ) ?: throw Exception("AKA Challenge from SIP returned null response")
-    val response = Base64.decode(responseB64, Base64.DEFAULT)
+    val payloadHex = challengeArray.joinToString("") { "%02x".format(it) }
 
-    if (response.isEmpty()) {
-        throw Exception("AKA Challenge from SIP returned empty response")
+    Rlog.d(TAG, "Requesting USIM AKA authentication via APDU challengeBytes=${challengeArray.size}")
+
+    val usimAid = getUsimAid(tm)
+
+    val iccChannel = tm.iccOpenLogicalChannel(usimAid)
+        ?: throw Exception("Failed to open logical channel to USIM (returned null)")
+    val channel = iccChannel.channel
+    if (channel <= 0) {
+        throw Exception("Failed to open logical channel to USIM: channelId=$channel")
     }
+
+    var apduResponseHex: String?
+    try {
+        apduResponseHex = tm.iccTransmitApduLogicalChannel(
+            channel,
+            0x00,               // cla
+            0x88,               // ins (AUTHENTICATE)
+            0x00,               // p1
+            0x81,               // p2 (3G Security Context)
+            challengeArray.size,// p3 (Lc = 34)
+            payloadHex          // data
+        )
+
+        if (!apduResponseHex.isNullOrEmpty() && apduResponseHex.length >= 4) {
+            val sw1 = apduResponseHex.substring(apduResponseHex.length - 4, apduResponseHex.length - 2).toInt(16)
+            val sw2 = apduResponseHex.substring(apduResponseHex.length - 2).toInt(16)
+
+            if (sw1 == 0x61) {
+                apduResponseHex = tm.iccTransmitApduLogicalChannel(
+                    channel, 0x00, 0xC0, 0x00, 0x00, sw2, ""
+                )
+            }
+        }
+    } finally {
+        tm.iccCloseLogicalChannel(channel)
+    }
+
+    if (apduResponseHex.isNullOrEmpty()) {
+        throw Exception("AKA Challenge APDU returned empty response")
+    }
+
+    val rawResponseBytes = apduResponseHex.chunked(2)
+        .map { it.toInt(16).toByte() }
+        .toByteArray()
+
+    if (rawResponseBytes.size < 2) {
+        throw Exception("AKA Challenge APDU response too short")
+    }
+
+    val response = rawResponseBytes.copyOfRange(0, rawResponseBytes.size - 2)
 
     val responseTag = response[0].toInt() and 0xff
     if (responseTag != 0xdb) {
-        Rlog.w(
-            TAG,
-            "AKA challenge from SIP failed tag=0x${responseTag.toString(16)} " +
-                    "len=${response.size}",
-        )
-
         if (responseTag == 0xdc) {
-            if (response.size < 2) {
-                throw Exception("AKA synchronization failure response missing AUTS length")
-            }
             val autsLen = response[1].toInt() and 0xff
-            if (response.size < 2 + autsLen) {
-                throw Exception(
-                    "AKA synchronization failure response truncated " +
-                            "autsLen=$autsLen len=${response.size}",
-                )
-            }
             val auts = response.copyOfRange(2, 2 + autsLen)
-            val trailing = response.copyOfRange(2 + autsLen, response.size)
-            Rlog.w(
-                TAG,
-                "AKA synchronization failure/AUTS returned by USIM " +
-                        "autsLen=$autsLen trailingBytes=${trailing.size}",
-            )
             return SipAkaChallengeResult.SynchronizationFailure(auts)
         }
-
-        throw Exception("AKA Challenge from SIP failed tag=0x${responseTag.toString(16)}")
+        throw Exception("AKA Challenge failed with tag=0x${responseTag.toString(16)}")
     }
 
     val responseStream = response.iterator()
-    // 0xdb
-    responseStream.nextByte()
-    val resLen = responseStream.nextByte().toInt()
-    Rlog.d(TAG, "resLen $resLen")
+    responseStream.nextByte() // 0xdb
+    val resLen = responseStream.nextByte().toInt() and 0xff
     val res = (0 until resLen).map { responseStream.nextByte() }.toList()
-    val ckLen = responseStream.nextByte().toInt()
-    Rlog.d(TAG, "ckLen $ckLen")
+    val ckLen = responseStream.nextByte().toInt() and 0xff
     val ck = (0 until ckLen).map { responseStream.nextByte() }.toList()
-    val ikLen = responseStream.nextByte().toInt()
-    Rlog.d(TAG, "ikLen $ikLen")
+    val ikLen = responseStream.nextByte().toInt() and 0xff
     val ik = (0 until ikLen).map { responseStream.nextByte() }.toList()
 
     Rlog.d(TAG, "USIM AKA authentication succeeded resLen=$resLen ckLen=$ckLen ikLen=$ikLen")
