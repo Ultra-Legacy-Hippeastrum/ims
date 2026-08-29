@@ -23,9 +23,6 @@ object SipUplinkAudioEncoder {
             Rlog.d(logTag, "AudioRecord.read nRead=$size allZero=$allZero (bufferSize=${buffer.size})")
         }
 
-        val inBufIdx = encoder.dequeueInputBuffer(-1)
-        val inBuf = encoder.getInputBuffer(inBufIdx)!!
-        inBuf.clear()
         if (size > 0) {
             SipUplinkGain.applyInPlace(
                 buffer = buffer,
@@ -33,10 +30,32 @@ object SipUplinkAudioEncoder {
                 gainQ8 = gainQ8,
             )
         }
-        inBuf.put(buffer, 0, size)
 
-        // Fake timestamp but it is not appearing in the output stream anyway
-        encoder.queueInputBuffer(inBufIdx, 0, size, System.nanoTime() / 1000, 0)
+        // AudioRecord.read() can return more PCM than a single MediaCodec
+        // input buffer holds (one input buffer is sized for one encoder
+        // frame period, e.g. 20ms of AMR-WB @16kHz = 640 bytes, but a read
+        // can return a full internal buffer's worth, e.g. 1280 bytes for
+        // two frame periods). Feeding all of `size` into one input buffer
+        // in a single put() can throw BufferOverflowException if it
+        // doesn't fit. Split into as many input buffers as needed instead,
+        // each holding at most that buffer's real remaining() capacity.
+        //
+        // size<=0 still submits exactly one (empty) buffer, matching the
+        // original behavior.
+        var offset = 0
+        do {
+            val inBufIdx = encoder.dequeueInputBuffer(-1)
+            val inBuf = encoder.getInputBuffer(inBufIdx)!!
+            inBuf.clear()
+
+            val chunkSize = (size - offset).coerceIn(0, inBuf.remaining())
+            inBuf.put(buffer, offset, chunkSize)
+
+            // Fake timestamp but it is not appearing in the output stream anyway
+            encoder.queueInputBuffer(inBufIdx, 0, chunkSize, System.nanoTime() / 1000, 0)
+
+            offset += chunkSize
+        } while (offset < size)
     }
 
     fun drainEncodedOutput(
