@@ -178,8 +178,8 @@ internal object SipOutgoingInviteRequestBuilder {
             carrierPaniHeaders
         } else {
             // Fallback for Nexus 5:
-            // 3GPP-E-UTRAN-FDD with dummy Cell-ID
-            mapOf("p-access-network-info" to listOf("3GPP-E-UTRAN-FDD; utran-cell-id-3gpp=0010100010000001"))
+            // 3GPP-E-UTRAN-FDD
+            mapOf("p-access-network-info" to listOf("3GPP-E-UTRAN-FDD"))
         }
 
         val supported = if (preconditionEnabled) {
