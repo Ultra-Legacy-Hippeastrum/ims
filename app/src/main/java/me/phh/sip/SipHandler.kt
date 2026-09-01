@@ -856,14 +856,6 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
                 )
                 return@post
             }
-            if (!imsReady || !this::socket.isInitialized || !this::serverSocket.isInitialized) {
-                Rlog.d(
-                    TAG,
-                    "Deferring REGISTER service-tag update until IMS is ready: " +
-                        "voiceEnabled=$enabled reason=$reason",
-                )
-                return@post
-            }
 
             try {
                 updateRegistrationContact(socket)
@@ -1313,15 +1305,6 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
                 Rlog.d(
                     TAG,
                     "Keeping IWLAN IMS after airplane mode off because WFC still prefers Wi-Fi: " +
-                        "$reason ready=$imsReady tech=${registrationTechName(currentTech)}",
-                )
-                return@post
-            }
-
-            if (!imsReady || currentTech != REGISTRATION_TECH_IWLAN) {
-                Rlog.d(
-                    TAG,
-                    "Ignoring airplane-mode-off IMS refresh while not registered over IWLAN: " +
                         "$reason ready=$imsReady tech=${registrationTechName(currentTech)}",
                 )
                 return@post
