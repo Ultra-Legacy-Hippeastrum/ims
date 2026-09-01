@@ -95,7 +95,6 @@ object SipUplinkAudioEncoder {
                 continue
             }
             if (outBufIdx < 0) {
-                if (outCount > 0) Rlog.d(logTag, "Drained $outCount output buffers")
                 break
             }
             outCount++
