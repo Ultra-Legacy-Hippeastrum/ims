@@ -5,10 +5,12 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.SystemProperties
 import android.telephony.Rlog
 import android.telephony.TelephonyManager
 import android.telephony.ims.stub.ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN
 import android.telephony.ims.stub.ImsRegistrationImplBase.REGISTRATION_TECH_LTE
+import java.io.File
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -23,6 +25,9 @@ internal sealed class ImsNetworkEndpointResolution {
 }
 
 internal object ImsNetworkState {
+    const val PROP_PCSCF_FALLBACK = "persist.ims.pcscf_fallback"
+    private const val CACHE_FILE_PATH = "/data/system/ims_cached_pcscf.txt"
+
     fun registrationTechName(tech: Int): String =
         when (tech) {
             REGISTRATION_TECH_IWLAN -> "IWLAN"
@@ -57,6 +62,47 @@ internal object ImsNetworkState {
         }
     }
 
+    fun cachePcscf(tag: String, address: InetAddress) {
+        val ip = address.hostAddress ?: return
+        try {
+            val file = File(CACHE_FILE_PATH)
+            val current = if (file.exists()) file.readText().trim() else ""
+            if (current != ip) {
+                Rlog.i(tag, "Caching discovered P-CSCF ($ip) to $CACHE_FILE_PATH")
+                file.parentFile?.mkdirs()
+                file.writeText(ip)
+            }
+        } catch (t: Throwable) {
+            Rlog.w(tag, "Failed to cache P-CSCF to $CACHE_FILE_PATH", t)
+        }
+    }
+
+    private fun readCachedOrFallbackPcscf(ipVersionPolicy: SipIpVersionPolicy): InetAddress? {
+        val manual = SystemProperties.get(PROP_PCSCF_FALLBACK, "")
+            .trim()
+            .takeIf { it.isNotEmpty() }
+            ?.let { hostOrIp ->
+                try {
+                    InetAddress.getAllByName(hostOrIp).firstOrNull(ipVersionPolicy::accepts)
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+        if (manual != null) return manual
+
+        return try {
+            val file = File(CACHE_FILE_PATH)
+            if (file.exists()) {
+                val ip = file.readText().trim()
+                if (ip.isNotEmpty()) {
+                    InetAddress.getAllByName(ip).firstOrNull(ipVersionPolicy::accepts)
+                } else null
+            } else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     fun getPcscfServers(
         lp: LinkProperties,
         ipVersionPolicy: SipIpVersionPolicy = SipIpVersionPolicy.ANY,
@@ -65,7 +111,19 @@ internal object ImsNetworkState {
             .filterIsInstance<InetAddress>()
             .sortedBy { if (it is Inet6Address) 0 else 1 }
         val matching = addresses.filter(ipVersionPolicy::accepts)
-        return matching.ifEmpty { addresses }
+        val netPcscfs = matching.ifEmpty { addresses }
+
+        if (netPcscfs.isNotEmpty()) {
+            cachePcscf("ImsNetworkState", netPcscfs[0])
+            return netPcscfs
+        }
+
+        val cached = readCachedOrFallbackPcscf(ipVersionPolicy)
+        return if (cached != null) {
+            listOf(cached)
+        } else {
+            emptyList()
+        }
     }
 
     fun getImsLocalAddress(
@@ -100,37 +158,23 @@ internal object ImsNetworkState {
         val pcscf = preferredPcscf ?: if (pcscfs.isNotEmpty()) {
             pcscfs[0]
         } else {
-            val dnsFallback = android.os.SystemProperties
-                .get("persist.ims.pcscf_fallback", "")
-                .trim()
-                .takeIf { it.isNotEmpty() }
-                ?.let { hostOrIp ->
-                    try {
-                        InetAddress.getAllByName(hostOrIp).firstOrNull(ipVersionPolicy::accepts)
-                    } catch (t: Throwable) {
-                        null
-                    }
-                }
-                ?: try {
-                    InetAddress.getAllByName(
-                        "ims.mnc${mnc}.mcc${mcc}.pub.3gppnetwork.org",
-                    ).firstOrNull(ipVersionPolicy::accepts)
-                } catch (t: Throwable) {
-                    null
-                }
-                ?: try {
-                    InetAddress.getAllByName(
-                        "ims.mnc${mnc}.mcc${mcc}.3gppnetwork.org",
-                    ).firstOrNull(ipVersionPolicy::accepts)
-                } catch (t: Throwable) {
-                    null
-                }
+            val dnsFallback = try {
+                InetAddress.getAllByName("ims.mnc${mnc}.mcc${mcc}.pub.3gppnetwork.org")
+                    .firstOrNull(ipVersionPolicy::accepts)
+            } catch (t: Throwable) {
+                null
+            } ?: try {
+                InetAddress.getAllByName("ims.mnc${mnc}.mcc${mcc}.3gppnetwork.org")
+                    .firstOrNull(ipVersionPolicy::accepts)
+            } catch (t: Throwable) {
+                null
+            }
 
             if (dnsFallback != null) {
-                Rlog.w(tag, "No P-CSCF from RIL, using fallback: $dnsFallback")
+                Rlog.w(tag, "No P-CSCF from network or cache, using 3GPP DNS: $dnsFallback")
                 dnsFallback
             } else {
-                Rlog.w(tag, "No P-CSCF and all fallbacks failed, waiting for onLinkPropertiesChanged")
+                Rlog.w(tag, "No P-CSCF from network, cache or DNS, waiting for onLinkPropertiesChanged")
                 return ImsNetworkEndpointResolution.WaitingForPcscf
             }
         }
